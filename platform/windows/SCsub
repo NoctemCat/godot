@@ -9,6 +9,7 @@ from pathlib import Path
 import platform_windows_builders
 
 from methods import redirect_emitter
+from platform_methods import filter_file_libs, combine_libs_ar
 
 sources = []
 
@@ -85,9 +86,12 @@ if env["accesskit"] and not env.msvc:
     sources += env.DEFLIB("uiautomationcore")
 
 if env["library_type"] == "static_library":
-    prog = env.add_library("#bin/godot", sources, PROGSUFFIX=env["PROGSUFFIX"])
+    win_lib = env.add_library("#bin/godot_static", common_win)
+    prog = env.CommandNoCache(f"#bin/libgodot{env["LIBSUFFIX"]}", filter_file_libs([win_lib] + env["LIBS"]), env.Run(combine_libs_ar))
+    env.add_configuration_file(f"#bin/libgodot{env["LIBSUFFIX"].rsplit(".", 1)[0]}.configure")
 elif env["library_type"] == "shared_library":
     prog = env.add_shared_library("#bin/godot", sources, PROGSUFFIX=env["PROGSUFFIX"])
+    env.add_configuration_file(f"#bin/libgodot{env["LIBSUFFIX"].rsplit(".", 1)[0]}.configure")
 else:
     prog = env.add_program("#bin/godot", sources, PROGSUFFIX=env["PROGSUFFIX"])
 arrange_program_clean(prog)

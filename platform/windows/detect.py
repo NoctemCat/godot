@@ -687,7 +687,16 @@ def configure_mingw(env: "SConsEnvironment"):
     env.AppendUnique(RCFLAGS=f"--target={ARCH_TARGETS[env['arch']]}")
 
     env["OBJCOPY"] = get_detected(env, "objcopy")
+    if env["library_type"] == "static_library":
+        env["OBJCOPY"] = get_detected(env, "llvm-objcopy") if env["use_llvm"] else get_detected(env, "objcopy")
     env["STRIP"] = get_detected(env, "strip")
+    if env["lto"] != "none" or env["library_type"] == "static_library":
+        if env["use_llvm"]:
+            env["RANLIB"] = "llvm-ranlib"
+            env["AR"] = "llvm-ar"
+        else:
+            env["RANLIB"] = get_detected(env, "gcc-ranlib")
+            env["AR"] = get_detected(env, "gcc-ar" if os.name != "nt" else "ar")
 
     ## LTO
 

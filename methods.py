@@ -644,6 +644,8 @@ def add_configuration_file(env, name, opts=None, **args):
     if env["module_mono_enabled"]:
         props_lines = []
         for key, value in opts.items():
+            if value.count("\\") > 0:
+                value = value.replace("\\", "/")
             props_lines.append(env.Literal(f"        <GODOT_{key}>{value}</GODOT_{key}>"))
 
         config_file_props = env.Textfile(f"{name}.props", [
