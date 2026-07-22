@@ -2375,15 +2375,18 @@ void postinitialize_handler(Object *p_object) {
 }
 
 void ObjectDB::debug_objects(DebugFunc p_func, void *p_user_data) {
-	spin_lock.lock();
+	ObjectDBEpoch::block("ObjectDB::debug_objects");
+	ObjectDBEpoch::wait_until_inactive();
 
-	for (uint32_t i = 0, count = slot_count; i < slot_max && count != 0; i++) {
-		if (object_slots[i].validator) {
-			p_func(object_slots[i].object, p_user_data);
+	for (uint32_t i = 0, count = ObjectDB::get_object_count(); i < slot_max && count != 0; i++) {
+		ObjectSlot *slot = object_slots[i].get();
+		if (slot->validator) {
+			p_func(slot->object, p_user_data);
 			count--;
 		}
 	}
-	spin_lock.unlock();
+
+	ObjectDBEpoch::unblock();
 }
 
 #ifdef TOOLS_ENABLED
@@ -2432,100 +2435,169 @@ void Object::get_argument_options(const StringName &p_function, int p_idx, List<
 }
 #endif
 
-SpinLock ObjectDB::spin_lock;
-uint32_t ObjectDB::slot_count = 0;
-uint32_t ObjectDB::slot_max = 0;
-ObjectDB::ObjectSlot *ObjectDB::object_slots = nullptr;
-uint64_t ObjectDB::validator_counter = 0;
-
 int ObjectDB::get_object_count() {
-	return slot_count;
+	return used_slot_count.get() - free_slot_count.get();
+}
+
+ObjectDB::ObjectSlot *ObjectDB::get_empty_slot() {
+	// Try to reuse the existing free slot.
+	ObjectSlot *new_slot = nullptr;
+	if (free_slots.pop(new_slot)) {
+		free_slot_count.sub(1);
+		return new_slot;
+	}
+
+	// Failed to reuse existing slot, reserve the new slot index.
+	uint32_t new_slot_idx = used_slot_count.postadd(1);
+
+	// Loop until the new index fit inside slots array.
+	while (unlikely(new_slot_idx >= slot_max)) {
+		ObjectDBEpoch::block("ObjectDB::add_instance");
+		if (new_slot_idx >= slot_max) {
+			ObjectDBEpoch::wait_until_inactive();
+			CRASH_COND(new_slot_idx >= (1 << OBJECTDB_SLOT_MAX_COUNT_BITS));
+
+			uint32_t new_slot_max = slot_max > 0 ? slot_max * 2 : 1;
+			SafePointer<ObjectSlot> *new_slots = memnew_arr(SafePointer<ObjectSlot>, new_slot_max);
+			for (uint32_t i = 0; i < slot_max; i++) {
+				new_slots[i].set(object_slots[i].get());
+			}
+			for (uint32_t i = slot_max; i < new_slot_max; i++) {
+				new_slots[i].set(invalid_slot);
+			}
+			SafePointer<ObjectSlot> *old_slots = object_slots;
+			object_slots = new_slots;
+			if (old_slots) {
+				memdelete_arr(old_slots);
+			}
+
+			slot_max = new_slot_max;
+		}
+		ObjectDBEpoch::unblock();
+	}
+
+	new_slot = memnew(ObjectSlot);
+	new_slot->object = nullptr;
+	new_slot->is_ref_counted = false;
+	new_slot->slot_idx = new_slot_idx;
+	new_slot->validator = 0;
+	return new_slot;
 }
 
 ObjectID ObjectDB::add_instance(Object *p_object) {
-	spin_lock.lock();
-	if (unlikely(slot_count == slot_max)) {
-		CRASH_COND(slot_count == (1 << OBJECTDB_SLOT_MAX_COUNT_BITS));
-
-		uint32_t new_slot_max = slot_max > 0 ? slot_max * 2 : 1;
-		object_slots = (ObjectSlot *)memrealloc(object_slots, sizeof(ObjectSlot) * new_slot_max);
-		for (uint32_t i = slot_max; i < new_slot_max; i++) {
-			object_slots[i].object = nullptr;
-			object_slots[i].is_ref_counted = false;
-			object_slots[i].next_free = i;
-			object_slots[i].validator = 0;
-		}
-		slot_max = new_slot_max;
+	ObjectSlot *empty_slot = get_empty_slot();
+	if (empty_slot->object != nullptr) {
+		ERR_FAIL_COND_V(empty_slot->object != nullptr, ObjectID());
 	}
-
-	uint32_t slot = object_slots[slot_count].next_free;
-	if (object_slots[slot].object != nullptr) {
-		spin_lock.unlock();
-		ERR_FAIL_COND_V(object_slots[slot].object != nullptr, ObjectID());
+	empty_slot->object = p_object;
+	empty_slot->is_ref_counted = p_object->is_ref_counted();
+	uint64_t counter = validator_counter.add(1) & OBJECTDB_VALIDATOR_MASK;
+	if (unlikely(counter == 0)) {
+		validator_counter.set(1);
 	}
-	object_slots[slot].object = p_object;
-	object_slots[slot].is_ref_counted = p_object->is_ref_counted();
-	validator_counter = (validator_counter + 1) & OBJECTDB_VALIDATOR_MASK;
-	if (unlikely(validator_counter == 0)) {
-		validator_counter = 1;
-	}
-	object_slots[slot].validator = validator_counter;
+	empty_slot->validator = counter;
 
-	uint64_t id = validator_counter;
+	ObjectDBEpoch::enter();
+	object_slots[empty_slot->slot_idx].set(empty_slot);
+	ObjectDBEpoch::exit();
+
+	ObjectDBEpoch::try_advance();
+
+	uint64_t id = counter;
 	id <<= OBJECTDB_SLOT_MAX_COUNT_BITS;
-	id |= uint64_t(slot);
+	id |= uint64_t(empty_slot->slot_idx);
 
 	if (p_object->is_ref_counted()) {
 		id |= OBJECTDB_REFERENCE_BIT;
 	}
-
-	slot_count++;
-
-	spin_lock.unlock();
 
 	return ObjectID(id);
 }
 
 void ObjectDB::remove_instance(Object *p_object) {
 	uint64_t t = p_object->get_instance_id();
-	uint32_t slot = t & OBJECTDB_SLOT_MAX_COUNT_MASK; //slot is always valid on valid object
+	uint32_t slot_idx = t & OBJECTDB_SLOT_MAX_COUNT_MASK; // Slot is always valid on valid object.
 
-	spin_lock.lock();
-
+	ObjectDBEpoch::enter();
 #ifdef DEBUG_ENABLED
+	ObjectSlot slot = *object_slots[slot_idx].get();
 
-	if (object_slots[slot].object != p_object) {
-		spin_lock.unlock();
-		ERR_FAIL_COND(object_slots[slot].object != p_object);
+	if (slot.object != p_object) {
+		ObjectDBEpoch::exit();
+		ERR_FAIL_COND(slot.object != p_object);
 	}
 	{
 		uint64_t validator = (t >> OBJECTDB_SLOT_MAX_COUNT_BITS) & OBJECTDB_VALIDATOR_MASK;
-		if (object_slots[slot].validator != validator) {
-			spin_lock.unlock();
-			ERR_FAIL_COND(object_slots[slot].validator != validator);
+		if (slot.validator != validator) {
+			ObjectDBEpoch::exit();
+			ERR_FAIL_COND(slot.validator != validator);
 		}
 	}
 
 #endif
-	//decrease slot count
-	slot_count--;
-	//set the free slot properly
-	object_slots[slot_count].next_free = slot;
-	//invalidate, so checks against it fail
-	object_slots[slot].validator = 0;
-	object_slots[slot].is_ref_counted = false;
-	object_slots[slot].object = nullptr;
+	// Invalidate, so checks against it fail.
+	ObjectSlot *retire_ptr = object_slots[slot_idx].exchange(invalid_slot);
+	// Increase free slot count.
+	free_slot_count.add(1);
 
-	spin_lock.unlock();
+	ObjectDBEpoch::retire(retire_ptr, [](void *p_slot) {
+		ObjectSlot *s = (ObjectSlot *)p_slot;
+		s->validator = 0;
+		s->is_ref_counted = 0;
+		s->object = nullptr;
+		free_slots.insert(s);
+	});
+
+	ObjectDBEpoch::exit();
+
+	ObjectDBEpoch::try_advance();
+	// Decrease slot count.
+	// slot_count.sub(1);
+
+	//decrease slot count
+	// slot_count--;
+	//set the free slot properly
+	// object_slots[slot_count].next_free = slot;
+	// object_slots[slot].validator = 0;
+	// object_slots[slot].is_ref_counted = false;
+	// object_slots[slot].object = nullptr;
+}
+
+Object *ObjectDB::get_instance(ObjectID p_instance_id) {
+	uint64_t id = p_instance_id;
+	uint32_t slot_idx = id & OBJECTDB_SLOT_MAX_COUNT_MASK;
+
+	ObjectDBEpoch::enter();
+	ERR_FAIL_COND_V(slot_idx >= slot_max, nullptr); // This should never happen unless RID is corrupted.
+	ObjectSlot slot = *object_slots[slot_idx].get();
+	ObjectDBEpoch::exit();
+
+	uint64_t validator = (id >> OBJECTDB_SLOT_MAX_COUNT_BITS) & OBJECTDB_VALIDATOR_MASK;
+
+	if (unlikely(slot.validator != validator)) {
+		return nullptr;
+	}
+
+	return slot.object;
 }
 
 void ObjectDB::setup() {
-	//nothing to do now
+	ObjectDBEpoch::block("ObjectDB::setup");
+
+	invalid_slot = memnew(ObjectSlot);
+	invalid_slot->validator = 0;
+	invalid_slot->slot_idx = 0;
+	invalid_slot->is_ref_counted = false;
+	invalid_slot->object = nullptr;
+
+	ObjectDBEpoch::unblock();
 }
 
 void ObjectDB::cleanup() {
-	spin_lock.lock();
+	ObjectDBEpoch::block("ObjectDB::cleanup");
+	ObjectDBEpoch::wait_until_inactive();
 
+	uint32_t slot_count = ObjectDB::get_object_count();
 	if (slot_count > 0) {
 		WARN_PRINT(vformat("%d ObjectDB %s leaked at exit (run with `--verbose` for details).", slot_count, slot_count == 1 ? "instance was" : "instances were"));
 		if (OS::get_singleton()->is_stdout_verbose()) {
@@ -2537,8 +2609,9 @@ void ObjectDB::cleanup() {
 			Callable::CallError call_error;
 
 			for (uint32_t i = 0, count = slot_count; i < slot_max && count != 0; i++) {
-				if (object_slots[i].validator) {
-					Object *obj = object_slots[i].object;
+				ObjectSlot slot = *object_slots[i].get();
+				if (slot.validator) {
+					Object *obj = slot.object;
 
 					String extra_info;
 					if (obj->is_class("Node")) {
@@ -2551,7 +2624,7 @@ void ObjectDB::cleanup() {
 						extra_info = " - Reference count: " + itos((static_cast<RefCounted *>(obj))->get_reference_count());
 					}
 
-					uint64_t id = uint64_t(i) | (uint64_t(object_slots[i].validator) << OBJECTDB_SLOT_MAX_COUNT_BITS) | (object_slots[i].is_ref_counted ? OBJECTDB_REFERENCE_BIT : 0);
+					uint64_t id = uint64_t(i) | (uint64_t(slot.validator) << OBJECTDB_SLOT_MAX_COUNT_BITS) | (slot.is_ref_counted ? OBJECTDB_REFERENCE_BIT : 0);
 					DEV_ASSERT(id == (uint64_t)obj->get_instance_id()); // We could just use the id from the object, but this check may help catching memory corruption catastrophes.
 					print_line("Leaked instance: " + String(obj->get_class()) + ":" + uitos(id) + extra_info);
 
@@ -2562,9 +2635,27 @@ void ObjectDB::cleanup() {
 		}
 	}
 
-	if (object_slots) {
-		memfree(object_slots);
+	ObjectDBEpoch::unblock();
+	{
+		ObjectSlot *free_slot = nullptr;
+		while (free_slots.pop(free_slot)) {
+			memdelete(free_slot);
+		}
+		free_slot_count.set(0);
 	}
+	for (uint32_t i = 0; i < used_slot_count.get(); i++) {
+		ObjectSlot *slot = object_slots[i].get();
+		if (slot != invalid_slot) {
+			memdelete(slot);
+		}
+	}
+	used_slot_count.set(0);
+	if (object_slots) {
+		memdelete_arr(object_slots);
+		object_slots = nullptr;
+	}
+	memdelete(invalid_slot);
+	invalid_slot = nullptr;
 
-	spin_lock.unlock();
+	ObjectDBEpoch::sync("ObjectDB::cleanup end");
 }

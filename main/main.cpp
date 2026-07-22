@@ -57,6 +57,7 @@
 #include "core/profiling/profiling.h"
 #include "core/register_core_types.h"
 #include "core/string/translation_server.h"
+#include "core/templates/epoch_owner.h"
 #include "core/variant/variant_parser.h"
 #include "core/version.h"
 #include "drivers/register_driver_types.h"
@@ -5040,6 +5041,8 @@ bool Main::iteration() {
 		frames = 0;
 	}
 
+	DefaultEpoch::try_advance();
+
 	iterating--;
 
 	if (movie_writer) {
@@ -5272,6 +5275,8 @@ void Main::cleanup(bool p_force) {
 	memdelete(engine);
 
 	unregister_core_types();
+
+	DefaultEpoch::sync("Default sync");
 
 	OS::get_singleton()->benchmark_end_measure("Shutdown", "Main::Cleanup");
 	OS::get_singleton()->benchmark_dump();

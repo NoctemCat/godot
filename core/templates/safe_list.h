@@ -31,10 +31,10 @@
 #pragma once
 
 #include "core/os/memory.h"
+#include "core/templates/epoch_owner.h"
 #include "core/typedefs.h"
 
 #include <atomic>
-#include <functional>
 #include <initializer_list>
 
 // Design goals for these classes:
@@ -47,92 +47,187 @@
 
 // This is used in very specific areas of the engine where it's critical that these guarantees are held.
 
-template <typename T, typename A = DefaultAllocator>
+template <typename T, typename A = DefaultAllocator, typename EBR = DefaultEpoch>
 class SafeList {
+	template <typename U>
+	static bool is_marked_ptr(U *p_ptr) {
+		return (reinterpret_cast<std::uintptr_t>(p_ptr) & 0x1) == 0x1;
+	}
+	template <typename U>
+	static U *get_marked_ptr(U *p_ptr) {
+		return reinterpret_cast<U *>(reinterpret_cast<std::uintptr_t>(p_ptr) | 0x1);
+	}
+	template <typename U>
+	static U *get_unmarked_ptr(U *p_ptr) {
+		return reinterpret_cast<U *>(reinterpret_cast<std::uintptr_t>(p_ptr) & ~0x1);
+	}
+
+	using DeletionFunc = void (*)(T);
+
 	struct SafeListNode {
-		std::atomic<SafeListNode *> next = nullptr;
-
-		// If the node is logically deleted, this pointer will typically point
-		// to the previous list item in time that was also logically deleted.
-		std::atomic<SafeListNode *> graveyard_next = nullptr;
-
-		std::function<void(T)> deletion_fn = [](T p_t) { return; };
-
+		std::atomic<SafeListNode *> next{ nullptr };
+		DeletionFunc deletion_fn = nullptr;
 		T val;
 	};
 
 	static_assert(std::atomic<T>::is_always_lock_free);
 
-	std::atomic<SafeListNode *> head = nullptr;
-	std::atomic<SafeListNode *> graveyard_head = nullptr;
-
-	std::atomic_uint active_iterator_count = 0;
+	SafeListNode *head = nullptr;
 
 public:
 	class Iterator {
 		friend class SafeList;
 
-		SafeListNode *cursor = nullptr;
-		SafeList *list = nullptr;
+		SafeListNode *cursor;
 
-		Iterator(SafeListNode *p_cursor, SafeList *p_list) :
-				cursor(p_cursor), list(p_list) {
-			list->active_iterator_count++;
+		Iterator(SafeListNode *p_cursor) :
+				cursor(p_cursor) {
+			EBR::enter();
 		}
 
 	public:
 		Iterator(const Iterator &p_other) :
-				cursor(p_other.cursor), list(p_other.list) {
-			list->active_iterator_count++;
+				cursor(p_other.cursor) {
+			EBR::enter();
 		}
 
 		~Iterator() {
-			list->active_iterator_count--;
+			EBR::exit();
 		}
 
 	public:
-		T &operator*() {
-			return cursor->val;
-		}
+		T &operator*() { return cursor->val; }
 
 		Iterator &operator++() {
-			cursor = cursor->next;
+			SafeListNode *tmp = nullptr;
+			do {
+				SafeListNode *tmp = cursor->next.load();
+				cursor = get_unmarked_ptr(tmp);
+			} while (cursor && is_marked_ptr(tmp));
 			return *this;
 		}
 
 		// These two operators are mostly useful for comparisons to nullptr.
-		bool operator==(const void *p_other) const {
-			return cursor == p_other;
-		}
+		bool operator==(const void *p_other) const { return cursor == p_other; }
 
-		bool operator!=(const void *p_other) const {
-			return cursor != p_other;
-		}
+		bool operator!=(const void *p_other) const { return cursor != p_other; }
 
 		// These two allow easy range-based for loops.
-		bool operator==(const Iterator &p_other) const {
-			return cursor == p_other.cursor;
+		bool operator==(const Iterator &p_other) const { return cursor == p_other.cursor; }
+
+		bool operator!=(const Iterator &p_other) const { return cursor != p_other.cursor; }
+	};
+
+private:
+	template <typename ConditionFuncT>
+	bool _erase(DeletionFunc p_deletion_fn, ConditionFuncT &&p_search_cond) {
+		EBR::enter();
+
+		SafeListNode *prev;
+		SafeListNode *node;
+		SafeListNode *next;
+		do {
+			if (!_search_and_unlink(prev, node, next, std::forward<ConditionFuncT>(p_search_cond))) {
+				EBR::exit();
+				return false;
+			}
+		} while (!node->next.compare_exchange_strong(
+				next, get_marked_ptr(next), std::memory_order_release, std::memory_order_relaxed));
+
+		if (p_deletion_fn) {
+			node->deletion_fn = p_deletion_fn;
+		}
+		if (prev->next.compare_exchange_strong(
+					node, next, std::memory_order_release, std::memory_order_relaxed)) {
+			retire_node(node);
+		} else {
+			const SafeListNode *missed_node = next;
+			_search_and_unlink(prev, node, next, [&missed_node](SafeListNode *p_node) {
+				return p_node == missed_node;
+			});
 		}
 
-		bool operator!=(const Iterator &p_other) const {
-			return cursor != p_other.cursor;
+		EBR::exit();
+		return true;
+	}
+
+	template <typename ConditionFuncT>
+	bool _search_and_unlink(
+			SafeListNode *&r_prev, SafeListNode *&r_node, SafeListNode *&r_next, ConditionFuncT &&p_search_cond) {
+		bool try_again = true;
+		while (try_again) {
+			try_again = false;
+
+			r_prev = head;
+			r_node = head->next.load(std::memory_order_acquire);
+			while (r_node != nullptr) {
+				SafeListNode *node_next = r_node->next.load(std::memory_order_acquire);
+				if (is_marked_ptr(node_next)) {
+					if (!r_prev->next.compare_exchange_strong(
+								r_node, get_unmarked_ptr(node_next), std::memory_order_release,
+								std::memory_order_relaxed)) {
+						// Failed to unlink the current node, try again.
+						try_again = true;
+						break;
+					}
+					retire_node(r_node);
+					r_node = get_unmarked_ptr(node_next);
+				} else {
+					if (std::forward<ConditionFuncT>(p_search_cond)(r_node)) {
+						r_next = node_next;
+						return true;
+					}
+					r_prev = r_node;
+					r_node = node_next;
+				}
+			}
 		}
-	};
+		return false;
+	}
+
+	static void retire_node(SafeListNode *p_node) {
+		EBR::retire(p_node, [](void *p_void_node) {
+			SafeListNode *node = (SafeListNode *)p_void_node;
+			if (node->deletion_fn) {
+				node->deletion_fn(node->val);
+			}
+			memdelete_allocator<SafeListNode, A>(node);
+		});
+	}
 
 public:
 	// Calling this will cause an allocation.
-	void insert(T p_value) {
+	void insert(T p_value, DeletionFunc p_deletion_fn = nullptr) {
 		SafeListNode *new_node = memnew_allocator(SafeListNode, A);
-		new_node->val = p_value;
+		new_node->deletion_fn = p_deletion_fn;
+		new_node->val = std::move(p_value);
 		SafeListNode *expected_head = nullptr;
 		do {
-			expected_head = head.load();
-			new_node->next.store(expected_head);
-		} while (!head.compare_exchange_strong(/* expected= */ expected_head, /* new= */ new_node));
+			expected_head = head->next.load(std::memory_order_acquire);
+			new_node->next.store(expected_head, std::memory_order_release);
+		} while (!head->next.compare_exchange_weak(
+				expected_head, new_node, std::memory_order_release, std::memory_order_relaxed));
 	}
 
-	Iterator find(T p_value) {
-		for (Iterator it = begin(); it != end(); ++it) {
+	bool pop(T &r_value) {
+		EBR::enter();
+		SafeListNode *old_head = nullptr;
+		do {
+			old_head = head->next.load(std::memory_order_acquire);
+			if (old_head == nullptr) {
+				EBR::exit();
+				return false;
+			}
+		} while (!head->next.compare_exchange_weak(old_head, old_head->next.load(std::memory_order_acquire), std::memory_order_release, std::memory_order_relaxed));
+
+		r_value = old_head->val;
+		retire_node(old_head);
+		EBR::exit();
+		return true;
+	}
+
+	Iterator find(const T &p_value) {
+		for (Iterator it = begin(); it.cursor != nullptr; ++it) {
 			if (*it == p_value) {
 				return it;
 			}
@@ -140,105 +235,53 @@ public:
 		return end();
 	}
 
-	void erase(T p_value, std::function<void(T)> p_deletion_fn) {
-		Iterator tmp = find(p_value);
-		erase(tmp, p_deletion_fn);
+	bool erase(const T &p_value, DeletionFunc p_deletion_fn = nullptr) {
+		return _erase(p_deletion_fn, [&p_value](SafeListNode *p_node) {
+			return p_node->val == p_value;
+		});
 	}
 
-	void erase(T p_value) {
-		Iterator tmp = find(p_value);
-		erase(tmp, [](T p_t) { return; });
-	}
-
-	void erase(Iterator &p_iterator, std::function<void(T)> p_deletion_fn) {
-		p_iterator.cursor->deletion_fn = p_deletion_fn;
-		erase(p_iterator);
-	}
-
-	void erase(Iterator &p_iterator) {
-		if (find(p_iterator.cursor->val) == nullptr) {
-			// Not in the list, nothing to do.
-			return;
+	bool erase(const Iterator &p_iterator, DeletionFunc p_deletion_fn = nullptr) {
+		if (p_iterator.cursor == nullptr) {
+			return false;
 		}
-		// First, remove the node from the list.
-		while (true) {
-			Iterator prev = begin();
-			SafeListNode *expected_head = prev.cursor;
-			for (; prev != end(); ++prev) {
-				if (prev.cursor && prev.cursor->next == p_iterator.cursor) {
-					break;
-				}
+		return _erase(p_deletion_fn, [&p_iterator](SafeListNode *p_node) {
+			if (is_marked_ptr(p_iterator.cursor->next.load(std::memory_order_acquire))) {
+				return false;
 			}
-			if (prev != end()) {
-				// There exists a node before this.
-				prev.cursor->next.store(p_iterator.cursor->next.load());
-				// Done.
-				break;
-			} else {
-				if (head.compare_exchange_strong(/* expected= */ expected_head, /* new= */ p_iterator.cursor->next.load())) {
-					// Successfully reassigned the head pointer before another thread changed it to something else.
-					break;
-				}
-				// Fall through upon failure, try again.
-			}
-		}
-		// Then queue it for deletion by putting it in the node graveyard.
-		// Don't touch `next` because an iterator might still be pointing at this node.
-		SafeListNode *expected_head = nullptr;
-		do {
-			expected_head = graveyard_head.load();
-			p_iterator.cursor->graveyard_next.store(expected_head);
-		} while (!graveyard_head.compare_exchange_strong(/* expected= */ expected_head, /* new= */ p_iterator.cursor));
+			return p_node == p_iterator.cursor;
+		});
 	}
 
 	Iterator begin() {
-		return Iterator(head.load(), this);
-	}
-
-	Iterator end() {
-		return Iterator(nullptr, this);
-	}
-
-	// Calling this will cause zero to many deallocations.
-	bool maybe_cleanup() {
-		SafeListNode *cursor = nullptr;
-		SafeListNode *new_graveyard_head = nullptr;
+		SafeListNode *node = head->next.load();
+		SafeListNode *tmp = nullptr;
 		do {
-			// The access order here is theoretically important.
-			cursor = graveyard_head.load();
-			if (active_iterator_count.load() != 0) {
-				// It's not safe to clean up with an active iterator, because that iterator
-				// could be pointing to an element that we want to delete.
-				return false;
+			if (node == nullptr) {
+				break;
 			}
-			// Any iterator created after this point will never point to a deleted node.
-			// Swap it out with the current graveyard head.
-		} while (!graveyard_head.compare_exchange_strong(/* expected= */ cursor, /* new= */ new_graveyard_head));
-		// Our graveyard list is now unreachable by any active iterators,
-		// detached from the main graveyard head and ready for deletion.
-		while (cursor) {
-			SafeListNode *tmp = cursor;
-			cursor = cursor->graveyard_next;
-			tmp->deletion_fn(tmp->val);
-			memdelete_allocator<SafeListNode, A>(tmp);
-		}
-		return true;
+			tmp = node->next.load();
+			node = get_unmarked_ptr(tmp);
+		} while (node && is_marked_ptr(tmp));
+		return Iterator(node);
 	}
 
-	_FORCE_INLINE_ SafeList() {}
-	_FORCE_INLINE_ SafeList(std::initializer_list<T> p_init) {
+	Iterator end() { return Iterator(nullptr); }
+
+	// Calling this will try to advance the epoch.
+	bool try_advance_epoch() {
+		EBR::try_advance();
+	}
+
+	SafeList() : head(memnew_allocator(SafeListNode, A)) {}
+	SafeList(std::initializer_list<T> p_init) : head(memnew_allocator(SafeListNode, A)) {
 		for (const T &E : p_init) {
 			insert(E);
 		}
 	}
 
 	~SafeList() {
-#ifdef DEBUG_ENABLED
-		if (!maybe_cleanup()) {
-			ERR_PRINT("There are still iterators around when destructing a SafeList. Memory will be leaked. This is a bug.");
-		}
-#else
-		maybe_cleanup();
-#endif
+		memdelete_allocator<SafeListNode, A>(head);
+		EBR::try_advance();
 	}
 };

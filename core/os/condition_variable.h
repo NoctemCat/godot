@@ -64,6 +64,16 @@ public:
 		condition.wait(p_lock.mutex._get_lock());
 	}
 
+	template <typename BinaryMutexT, typename PredicateT>
+	_ALWAYS_INLINE_ void wait(const MutexLock<BinaryMutexT> &p_lock, PredicateT &&p_predicate) const {
+		condition.wait(p_lock._get_lock(), std::forward<PredicateT>(p_predicate));
+	}
+
+	template <int Tag, typename PredicateT>
+	_ALWAYS_INLINE_ void wait(const MutexLock<SafeBinaryMutex<Tag>> &p_lock, PredicateT &&p_predicate) const {
+		condition.wait(p_lock.mutex._get_lock(), std::forward<PredicateT>(p_predicate));
+	}
+
 	_ALWAYS_INLINE_ void notify_one() const {
 		condition.notify_one();
 	}
@@ -79,6 +89,12 @@ class ConditionVariable {
 public:
 	template <typename BinaryMutexT>
 	void wait(const MutexLock<BinaryMutexT> &p_lock) const {}
+	template <int Tag>
+	void wait(const MutexLock<SafeBinaryMutex<Tag>> &p_lock) const {}
+	template <typename BinaryMutexT, typename PredicateT>
+	void wait(const MutexLock<BinaryMutexT> &p_lock, PredicateT &&p_predicate) const {}
+	template <int Tag, typename PredicateT>
+	void wait(const MutexLock<SafeBinaryMutex<Tag>> &p_lock, PredicateT &&p_predicate) const {}
 	void notify_one() const {}
 	void notify_all() const {}
 };

@@ -35,11 +35,15 @@
 #include "core/object/method_info.h"
 #include "core/object/object_id.h"
 #include "core/object/property_info.h"
+#include "core/os/memory.h"
 #include "core/os/mutex.h"
 #include "core/os/spin_lock.h"
+#include "core/templates/epoch_owner.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/list.h"
+#include "core/templates/safe_list.h"
+#include "core/templates/safe_pointer.h"
 #include "core/templates/safe_refcount.h"
 #include "core/variant/variant.h"
 
@@ -887,21 +891,26 @@ class ObjectDB {
 
 	struct ObjectSlot { // 128 bits per slot.
 		uint64_t validator : OBJECTDB_VALIDATOR_BITS;
-		uint64_t next_free : OBJECTDB_SLOT_MAX_COUNT_BITS;
+		uint64_t slot_idx : OBJECTDB_SLOT_MAX_COUNT_BITS;
 		uint64_t is_ref_counted : 1;
 		Object *object = nullptr;
 	};
 
-	static SpinLock spin_lock;
-	static uint32_t slot_count;
-	static uint32_t slot_max;
-	static ObjectSlot *object_slots;
-	static uint64_t validator_counter;
+	using ObjectDBEpoch = EpochOwner<1>;
+
+	alignas(Thread::CACHE_LINE_BYTES) inline static SafeNumeric<uint32_t> used_slot_count{ 0 };
+	alignas(Thread::CACHE_LINE_BYTES) inline static SafeNumeric<uint32_t> free_slot_count{ 0 };
+	alignas(Thread::CACHE_LINE_BYTES) inline static SafeList<ObjectSlot *, DefaultAllocator, ObjectDBEpoch> free_slots;
+	alignas(Thread::CACHE_LINE_BYTES) inline static uint32_t slot_max = 0;
+	alignas(Thread::CACHE_LINE_BYTES) inline static SafePointer<ObjectSlot> *object_slots = nullptr;
+	alignas(Thread::CACHE_LINE_BYTES) inline static ObjectSlot *invalid_slot = nullptr;
+	alignas(Thread::CACHE_LINE_BYTES) inline static SafeNumeric<uint64_t> validator_counter{ 0 };
 
 	friend class Object;
 	friend void unregister_core_types();
 	static void cleanup();
 
+	static ObjectSlot *get_empty_slot();
 	static ObjectID add_instance(Object *p_object);
 	static void remove_instance(Object *p_object);
 
@@ -911,27 +920,7 @@ class ObjectDB {
 public:
 	typedef void (*DebugFunc)(Object *p_obj, void *p_user_data);
 
-	_ALWAYS_INLINE_ static Object *get_instance(ObjectID p_instance_id) {
-		uint64_t id = p_instance_id;
-		uint32_t slot = id & OBJECTDB_SLOT_MAX_COUNT_MASK;
-
-		ERR_FAIL_COND_V(slot >= slot_max, nullptr); // This should never happen unless RID is corrupted.
-
-		spin_lock.lock();
-
-		uint64_t validator = (id >> OBJECTDB_SLOT_MAX_COUNT_BITS) & OBJECTDB_VALIDATOR_MASK;
-
-		if (unlikely(object_slots[slot].validator != validator)) {
-			spin_lock.unlock();
-			return nullptr;
-		}
-
-		Object *object = object_slots[slot].object;
-
-		spin_lock.unlock();
-
-		return object;
-	}
+	static Object *get_instance(ObjectID p_instance_id);
 
 	template <typename T>
 	_ALWAYS_INLINE_ static T *get_instance(ObjectID p_instance_id) {
@@ -941,6 +930,7 @@ public:
 	template <typename T>
 	_ALWAYS_INLINE_ static Ref<T> get_ref(ObjectID p_instance_id); // Defined in ref_counted.h
 
+	// Debug function can't use ObjectDB at all, even inderectly.
 	static void debug_objects(DebugFunc p_func, void *p_user_data);
 	static int get_object_count();
 };

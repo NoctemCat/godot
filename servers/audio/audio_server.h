@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/epoch_owner.h"
 #include "core/templates/safe_list.h"
 #include "core/variant/variant.h"
 #include "servers/audio/audio_bus_layout.h"
@@ -53,6 +54,10 @@ public:
 	typedef void (*AudioCallback)(void *p_userdata);
 
 private:
+	using AudioEpoch = EpochOwner<2>;
+	template <typename T>
+	using AudioSafeList = SafeList<T, DefaultAllocator, AudioEpoch>;
+
 	uint64_t mix_time = 0;
 	int mix_size = 0;
 
@@ -129,7 +134,7 @@ private:
 		// 3. The playback is (maybe) deleted, and the state is set to FADE_OUT_TO_DELETION.
 		// 3.1. The playback is mixed after being deleted, and the audio server thread atomically sets the state to AWAITING_DELETION after performing a brief fade-out.
 		// 		NOTE: The playback is not deallocated at this time because allocation and deallocation are not realtime-safe.
-		// 4. The playback is removed and deallocated on the main thread using the SafeList maybe_cleanup method.
+		// 4. The playback is removed and deallocated on the main thread using the AudioEpoch::try_advance method.
 		enum PlaybackState {
 			PAUSED = 0, // Paused. Keep this stream playback around though so it can be restarted.
 			PLAYING = 1, // Playing. Fading may still be necessary if volume changes!
@@ -155,15 +160,15 @@ private:
 		AudioFrame lookahead[AuSC::LOOKAHEAD_BUFFER_SIZE];
 	};
 
-	SafeList<AudioStreamPlaybackListNode *> playback_list;
-	SafeList<AudioStreamPlaybackBusDetails *> bus_details_graveyard;
+	AudioSafeList<AudioStreamPlaybackListNode *> playback_list;
+	AudioSafeList<AudioStreamPlaybackBusDetails *> bus_details_graveyard;
 	void _delete_stream_playback(Ref<AudioStreamPlayback> p_playback);
 	void _delete_stream_playback_list_node(AudioStreamPlaybackListNode *p_node);
 
 	void _cleanup_lists();
 
 	// TODO document if this is necessary.
-	SafeList<AudioStreamPlaybackBusDetails *> bus_details_graveyard_frame_old;
+	AudioSafeList<AudioStreamPlaybackBusDetails *> bus_details_graveyard_frame_old;
 
 	Vector<Vector<AudioFrame>> temp_buffer; //temp_buffer for each level
 	Vector<AudioFrame> mix_buffer;
@@ -187,9 +192,9 @@ private:
 		void *userdata = nullptr;
 	};
 
-	SafeList<CallbackItem *> update_callback_list;
-	SafeList<CallbackItem *> mix_callback_list;
-	SafeList<CallbackItem *> listener_changed_callback_list;
+	AudioSafeList<CallbackItem *> update_callback_list;
+	AudioSafeList<CallbackItem *> mix_callback_list;
+	AudioSafeList<CallbackItem *> listener_changed_callback_list;
 
 	friend class AudioDriver;
 	void _driver_process(int p_frames, int32_t *p_buffer);

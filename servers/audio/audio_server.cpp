@@ -1403,10 +1403,6 @@ void AudioServer::update() {
 }
 
 void AudioServer::_cleanup_lists() {
-	mix_callback_list.maybe_cleanup();
-	update_callback_list.maybe_cleanup();
-	listener_changed_callback_list.maybe_cleanup();
-	playback_list.maybe_cleanup();
 	for (AudioStreamPlaybackBusDetails *bus_details : bus_details_graveyard_frame_old) {
 		bus_details_graveyard_frame_old.erase(bus_details, [](AudioStreamPlaybackBusDetails *d) { delete d; });
 	}
@@ -1414,8 +1410,7 @@ void AudioServer::_cleanup_lists() {
 		bus_details_graveyard_frame_old.insert(bus_details);
 		bus_details_graveyard.erase(bus_details);
 	}
-	bus_details_graveyard.maybe_cleanup();
-	bus_details_graveyard_frame_old.maybe_cleanup();
+	AudioEpoch::try_advance();
 }
 
 void AudioServer::load_default_bus_layout() {
@@ -1921,7 +1916,14 @@ AudioServer::AudioServer() {
 AudioServer::~AudioServer() {
 	// Cleanup resources while we still have an active AudioServer singleton,
 	// for resources that depend on the singleton still existing.
+
 	_cleanup_lists();
+
+	for (AudioStreamPlaybackBusDetails *bus_details : bus_details_graveyard_frame_old) {
+		bus_details_graveyard_frame_old.erase(bus_details, [](AudioStreamPlaybackBusDetails *d) { delete d; });
+	}
+
+	AudioEpoch::sync("AudioEpoch sync");
 
 	singleton = nullptr;
 }
