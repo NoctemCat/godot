@@ -994,11 +994,11 @@ class ObjectDB {
 		_ALWAYS_INLINE_ SlotData get_data() const { return SlotData{ safe_data.get() }; }
 		_ALWAYS_INLINE_ void set_data(SlotData p_data) { safe_data.set(p_data); }
 	};
+	static constexpr size_t SAFE_NUMERIC_ALIGNMENT = Thread::CACHE_LINE_BYTES > alignof(SafeNumeric<uint64_t>) ? Thread::CACHE_LINE_BYTES : alignof(SafeNumeric<uint64_t>);
+	static constexpr uint32_t SLOTS_IN_CACHE_LINE = Math::division_round_up((uint64_t)Thread::CACHE_LINE_BYTES, (uint64_t)sizeof(ObjectDB::ObjectSlot));
 
-	static constexpr uint32_t SLOTS_IN_CACHE_LINE = Math::division_round_up(Thread::CACHE_LINE_BYTES, sizeof(ObjectDB::ObjectSlot));
-
-	alignas(Thread::CACHE_LINE_BYTES) inline static SafeNumeric<uint64_t> free_slots_top;
-	alignas(Thread::CACHE_LINE_BYTES) inline static SafeNumeric<uint64_t> slot_count;
+	alignas(SAFE_NUMERIC_ALIGNMENT) inline static SafeNumeric<uint64_t> free_slots_top{ 0 };
+	alignas(SAFE_NUMERIC_ALIGNMENT) inline static SafeNumeric<uint64_t> slot_count{ 0 };
 
 	inline static BinaryMutex mutex;
 	inline static SafeFlag is_blocked{ false };

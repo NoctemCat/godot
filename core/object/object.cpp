@@ -2669,9 +2669,9 @@ void ObjectDB::cleanup() {
 
 	OS::get_singleton()->delay_usec(1000);
 
-	uint32_t slot_count = get_object_count();
-	if (slot_count > 0) {
-		WARN_PRINT(vformat("%d ObjectDB %s leaked at exit (run with `--verbose` for details).", slot_count, slot_count == 1 ? "instance was" : "instances were"));
+	uint32_t count = get_object_count();
+	if (count > 0) {
+		WARN_PRINT(vformat("%d ObjectDB %s leaked at exit (run with `--verbose` for details).", count, count == 1 ? "instance was" : "instances were"));
 		if (OS::get_singleton()->is_stdout_verbose()) {
 			// Ensure calling the native classes because if a leaked instance has a script
 			// that overrides any of those methods, it'd not be OK to call them at this point,
@@ -2703,7 +2703,7 @@ void ObjectDB::cleanup() {
 						DEV_ASSERT(id == (uint64_t)obj->get_instance_id()); // We could just use the id from the object, but this check may help catching memory corruption catastrophes.
 						print_line("Leaked instance: " + String(obj->get_class()) + ":" + uitos(id) + extra_info);
 
-						if (--slot_count == 0) {
+						if (--count == 0) {
 							block_idx = block_max.get();
 							slot_idx = OBJECTDB_BLOCK_SIZE;
 							continue;

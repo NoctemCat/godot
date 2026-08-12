@@ -123,7 +123,7 @@ public:
 
 #else // THREADS_ENABLED
 
-static void _cpu_pause() {}
+_ALWAYS_INLINE_ static void _cpu_pause() {}
 
 class SpinLock {
 public:
