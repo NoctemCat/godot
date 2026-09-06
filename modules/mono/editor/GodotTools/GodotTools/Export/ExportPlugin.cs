@@ -99,7 +99,31 @@ namespace GodotTools.Export
                     { "default_value", false }
                 }
             );
+            exportOptionList.Add
+            (
+                new Godot.Collections.Dictionary()
+                {
+                    {
+                        "option", new Godot.Collections.Dictionary()
+                        {
+                            { "name", "dotnet/skip_native_export" },
+                            { "type", (int)Variant.Type.Bool }
+                        }
+                    },
+                    { "default_value", false }
+                }
+            );
             return exportOptionList;
+        }
+
+        public override bool _GetExportOptionVisibility(EditorExportPlatform platform, string option)
+        {
+            bool areAdvancedOptionsEnabled = GetExportPreset().AreAdvancedOptionsEnabled();
+            if (option == "dotnet/skip_native_export")
+            {
+                return areAdvancedOptionsEnabled;
+            }
+            return true;
         }
 
         private void AddExceptionMessage(EditorExportPlatform platform, Exception exception)
@@ -120,6 +144,9 @@ namespace GodotTools.Export
         public override void _ExportFile(string path, string type, string[] features)
         {
             base._ExportFile(path, type, features);
+
+            if ((bool)GetOption("dotnet/skip_native_export"))
+                return;
 
             if (type != Internal.CSharpLanguageType)
                 return;
@@ -172,6 +199,9 @@ namespace GodotTools.Export
             _ = flags; // Unused.
 
             if (!ProjectContainsDotNet())
+                return;
+
+            if ((bool)GetOption("dotnet/skip_native_export"))
                 return;
 
             string osName = GetExportPlatform().GetOsName();
