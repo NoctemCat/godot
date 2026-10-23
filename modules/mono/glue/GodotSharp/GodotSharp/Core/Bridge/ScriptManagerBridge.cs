@@ -518,7 +518,11 @@ namespace Godot.Bridge
                 {
                     // Use existing
                     NativeFuncs.godotsharp_ref_new_from_ref_counted_ptr(out *outScript, scriptPtr);
-                    return;
+                    if (!outScript->IsNull)
+                        return;
+
+                    // Remove invalid script and create new.
+                    RemoveScriptBridge(scriptPtr);
                 }
 
                 // This path is slower, but it's only executed for the first instantiation of the type
@@ -544,8 +548,14 @@ namespace Godot.Bridge
                     {
                         // Use existing
                         NativeFuncs.godotsharp_ref_new_from_ref_counted_ptr(out *outScript, scriptPtr);
-                        scriptPath = null;
-                        return false;
+                        if (!outScript->IsNull)
+                        {
+                            scriptPath = null;
+                            return false;
+                        }
+
+                        // Remove invalid script and create new.
+                        RemoveScriptBridge(scriptPtr);
                     }
 
                     // This path is slower, but it's only executed for the first instantiation of the type
@@ -660,6 +670,11 @@ namespace Godot.Bridge
         }
 
         [UnmanagedCallersOnly]
+        internal static void RemoveScriptBridgeCallback(IntPtr scriptPtr)
+        {
+            RemoveScriptBridge(scriptPtr);
+        }
+
         internal static void RemoveScriptBridge(IntPtr scriptPtr)
         {
             _scriptTypeBiMap.ReadWriteLock.EnterWriteLock();

@@ -80,7 +80,7 @@ namespace Godot.Bridge
                 ScriptManagerBridge_ScriptIsOrInherits = &ScriptManagerBridge.ScriptIsOrInherits,
                 ScriptManagerBridge_AddScriptBridge = &ScriptManagerBridge.AddScriptBridge,
                 ScriptManagerBridge_GetOrCreateScriptBridgeForPath = &ScriptManagerBridge.GetOrCreateScriptBridgeForPath,
-                ScriptManagerBridge_RemoveScriptBridge = &ScriptManagerBridge.RemoveScriptBridge,
+                ScriptManagerBridge_RemoveScriptBridge = &ScriptManagerBridge.RemoveScriptBridgeCallback,
                 ScriptManagerBridge_TryReloadRegisteredScriptWithClass = &ScriptManagerBridge.TryReloadRegisteredScriptWithClass,
                 ScriptManagerBridge_UpdateScriptTrampolines = &ScriptManagerBridge.UpdateScriptTrampolines,
                 ScriptManagerBridge_UpdateScriptClassInfo = &ScriptManagerBridge.UpdateScriptClassInfo,

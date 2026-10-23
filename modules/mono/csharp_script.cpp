@@ -3011,21 +3011,21 @@ void CSharpScript::_clear() {
 CSharpScript::CSharpScript() {
 	_clear();
 
-#ifdef DEBUG_ENABLED
 	{
 		MutexLock lock(CSharpLanguage::get_singleton()->script_instances_mutex);
+#ifdef DEBUG_ENABLED
 		CSharpLanguage::get_singleton()->script_list.add(&script_list);
-	}
 #endif // DEBUG_ENABLED
+	}
 }
 
 CSharpScript::~CSharpScript() {
-#ifdef DEBUG_ENABLED
 	{
 		MutexLock lock(CSharpLanguage::get_singleton()->script_instances_mutex);
+#ifdef DEBUG_ENABLED
 		CSharpLanguage::get_singleton()->script_list.remove(&script_list);
-	}
 #endif // DEBUG_ENABLED
+	}
 
 	if (GDMonoCache::godot_api_cache_updated) {
 		GDMonoCache::managed_callbacks.ScriptManagerBridge_RemoveScriptBridge(this);
