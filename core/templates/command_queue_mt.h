@@ -67,12 +67,8 @@ class CommandQueueMT {
 		template <size_t... I>
 		_FORCE_INLINE_ void call_impl(IndexSequence<I...>) {
 			// Move out of the Tuple, this will be destroyed as soon as the call is complete.
-			(instance->*method)(std::move(get<I>())...);
+			(instance->*method)(std::move(args).template get<I>()...);
 		}
-
-		// This method exists so we can call it in the parameter pack expansion in call_impl.
-		template <size_t I>
-		_FORCE_INLINE_ auto &get() { return ::tuple_get<I>(args); }
 	};
 
 	// Separate class from Command so we can save the space of the ret pointer for commands that don't return.
@@ -83,8 +79,9 @@ class CommandQueueMT {
 		R *ret;
 		Tuple<std::decay_t<Args>...> args;
 
-		_FORCE_INLINE_ CommandRet(T *p_instance, M p_method, R *p_ret, std::decay_t<Args>... p_args) :
-				CommandBase(true), instance(p_instance), method(p_method), ret(p_ret), args{ p_args... } {}
+		template <typename... FwdArgs>
+		_FORCE_INLINE_ CommandRet(T *p_instance, M p_method, R *p_ret, FwdArgs &&...p_args) :
+				CommandBase(true), instance(p_instance), method(p_method), ret(p_ret), args(std::forward<FwdArgs>(p_args)...) {}
 
 		void call() override {
 			*ret = call_impl(BuildIndexSequence<sizeof...(Args)>{});
@@ -94,12 +91,8 @@ class CommandQueueMT {
 		template <size_t... I>
 		_FORCE_INLINE_ R call_impl(IndexSequence<I...>) {
 			// Move out of the Tuple, this will be destroyed as soon as the call is complete.
-			return (instance->*method)(std::move(get<I>())...);
+			return (instance->*method)(std::move(args).template get<I>()...);
 		}
-
-		// This method exists so we can call it in the parameter pack expansion in call_impl.
-		template <size_t I>
-		_FORCE_INLINE_ auto &get() { return ::tuple_get<I>(args); }
 	};
 
 	/***** BASE *******/

@@ -30,93 +30,102 @@
 
 #pragma once
 
-// Simple recursive Tuple type that has no runtime overhead.
+// Simple multiple inheritance Tuple type that has no runtime overhead.
 //
-// The compile-time recursion works as follows:
+// The compile-time deduction works as follows:
 // Assume the following: Tuple<int, float> my_tuple(42, 3.14f);
-// This expands to a class hierarchy that inherits from the previous step.
+// This expands to a class hierarchy that creates a distinct TupleLeaf<I, T> for each value.
 // So in this case this leads to:
-//  - struct Tuple<int> : Tuple<float>   <--- This contains the int value.
-//  - struct Tuple<float>                <--- This contains the float value.
-// where each of the classes has a single field of the type for that step in the
-// recursion. So: float value;  int value; etc.
+//  - struct TupleLeaf<0, int>           <--- This contains the int value.
+//  - struct TupleLeaf<1, float>         <--- This contains the float value.
+// where each of the classes has a single field of the type. So: float value;  int value; etc.
 //
-// This works by splitting up the parameter pack for each step in the recursion minus the first.
-// so the first step creates the "T value" from the first template parameter.
-// any further template arguments end up in "Rest", which we then use to instantiate a new
-// tuple, but now minus the first argument. To write this all out:
+// This works by using fold expressions to inherit from every TupleLeaf<Is, Types>... at
+// the same time with the help of the index sequence.
 //
-// Tuple<int, float>
-// step 1: Tuple T = int, Rest = float. Results in a Tuple<int> : Tuple<float>
-// step 2: Tuple T = float, no Rest. Results in a Tuple<float>
-//
-// tuple_get<I> works through a similar recursion, using the inheritance chain to walk to the right node.
-// In order to tuple_get<1>(my_tuple), from the example tuple above:
-//
-// 1. We want tuple_get<1> to return the float, which is one level "up" from Tuple<int> : Tuple<float>,
-//    (the real type of the Tuple "root").
-// 2. Since index 1 > 0, it casts the tuple to its parent type (Tuple<float>). This works because
-//    we cast to Tuple<Rest...> which in this case is just float.
-// 3. Now we're looking for index 0 in Tuple<float>, which directly returns its value field. Note
-//    how get<0> is a template specialization.
-//
-// At compile time, this gets fully resolved. The compiler sees get<1>(my_tuple) and:
-// 1. Creates TupleGet<1, Tuple<int, float>>::tuple_get which contains the cast to Tuple<float>.
-// 2. Creates TupleGet<0, Tuple<float>>::tuple_get which directly returns the value.
-// 3. The compiler will then simply optimize all of this nonsense away and return the float directly.
+// Tuple<int, float> creates implementation:
+// TupleImpl<IndexSequence<0, 1>, int, float> : TupleLeaf<0, int>, TupleLeaf<1, float>
 
 #include "core/typedefs.h"
 
-template <typename... Types>
-struct Tuple;
+template <size_t I, typename T>
+class TupleLeaf {
+public:
+	using type = T;
 
-template <>
-struct Tuple<> {};
-
-template <typename T, typename... Rest>
-struct Tuple<T, Rest...> : Tuple<Rest...> {
+protected:
 	T value;
 
-	Tuple() = default;
+	constexpr TupleLeaf() = default;
 
-	template <typename F, typename... R>
-	_FORCE_INLINE_ Tuple(F &&p_first, R &&...p_rest) :
-			Tuple<Rest...>(std::forward<R>(p_rest)...),
-			value(std::forward<F>(p_first)) {}
+	template <typename U>
+	_FORCE_INLINE_ constexpr TupleLeaf(U &&p_value) :
+			value(std::forward<U>(p_value)) {}
 };
+
+// Don't implement, only for decltype.
+template <size_t I, typename T>
+_ALWAYS_INLINE_ TupleLeaf<I, T> _tuple_element_deduce(TupleLeaf<I, T> *);
+
+template <size_t I, typename TupleT>
+using TupleElement = typename decltype(_tuple_element_deduce<I>(static_cast<TupleT *>(nullptr)))::type;
+
+template <size_t I, typename TupleT>
+using DeducedLeaf = TupleLeaf<I, TupleElement<I, TupleT>>;
+
+template <typename IndexSequenceT, typename... Types>
+class TupleImpl;
+
+template <size_t... Is, typename... Types>
+class TupleImpl<IndexSequence<Is...>, Types...> : public TupleLeaf<Is, Types>... {
+protected:
+	constexpr TupleImpl() = default;
+
+	template <size_t... ArgsIs, typename... Args>
+	_ALWAYS_INLINE_ constexpr TupleImpl(IndexSequence<ArgsIs...>, Args &&...p_args) :
+			DeducedLeaf<ArgsIs, TupleImpl>(std::forward<Args>(p_args))... {}
+};
+
+template <typename... Types>
+class Tuple : public TupleImpl<BuildIndexSequence<sizeof...(Types)>, Types...> {
+public:
+	constexpr Tuple() = default;
+
+	template <typename Arg, typename... Args, std::enable_if_t<!std::is_same_v<Tuple, std::decay_t<Arg>>, int> = 0>
+	_FORCE_INLINE_ constexpr Tuple(Arg &&p_arg, Args &&...p_args) :
+			TupleImpl<BuildIndexSequence<sizeof...(Types)>, Types...>(
+					BuildIndexSequence<1 + sizeof...(Args)>{},
+					std::forward<Arg>(p_arg),
+					std::forward<Args>(p_args)...) {}
+
+	template <size_t I>
+	_FORCE_INLINE_ constexpr TupleElement<I, Tuple> &get() & { return this->DeducedLeaf<I, Tuple>::value; }
+	template <size_t I>
+	_FORCE_INLINE_ constexpr const TupleElement<I, Tuple> &get() const & { return this->DeducedLeaf<I, Tuple>::value; }
+	template <size_t I>
+	_FORCE_INLINE_ constexpr TupleElement<I, Tuple> &&get() && { return static_cast<TupleElement<I, Tuple> &&>(this->DeducedLeaf<I, Tuple>::value); }
+	template <size_t I>
+	_FORCE_INLINE_ constexpr const TupleElement<I, Tuple> &&get() const && { return static_cast<const TupleElement<I, Tuple> &&>(this->DeducedLeaf<I, Tuple>::value); }
+};
+
+template <typename Arg, typename... Args>
+Tuple(Arg &&p_arg, Args &&...p_args) -> Tuple<std::decay_t<Arg>, std::decay_t<Args>...>;
 
 // Tuple is zero-constructible if and only if all constrained types are zero-constructible.
 template <typename... Types>
 struct is_zero_constructible<Tuple<Types...>> : std::conjunction<is_zero_constructible<Types>...> {};
 
-template <size_t I, typename Tuple>
-struct TupleGet;
-
-template <typename First, typename... Rest>
-struct TupleGet<0, Tuple<First, Rest...>> {
-	_FORCE_INLINE_ static First &tuple_get(Tuple<First, Rest...> &p_tuple) {
-		return p_tuple.value;
-	}
-};
-
-// Rationale for using auto here is that the alternative is writing a
-// helper struct to create an otherwise useless type. we would have to write
-// a second recursive template chain like: TupleGetType<I, Tuple<First, Rest...>>::type
-// just to recover the type in the most baroque way possible.
-
-template <size_t I, typename First, typename... Rest>
-struct TupleGet<I, Tuple<First, Rest...>> {
-	_FORCE_INLINE_ static auto &tuple_get(Tuple<First, Rest...> &p_tuple) {
-		return TupleGet<I - 1, Tuple<Rest...>>::tuple_get(static_cast<Tuple<Rest...> &>(p_tuple));
-	}
+// Working structured bindings, add if needed.
+#if false
+namespace std {
+template <typename... Types>
+struct tuple_size<::Tuple<Types...>> {
+	static constexpr size_t value = sizeof...(Types);
 };
 
 template <size_t I, typename... Types>
-_FORCE_INLINE_ auto &tuple_get(Tuple<Types...> &p_tuple) {
-	return TupleGet<I, Tuple<Types...>>::tuple_get(p_tuple);
-}
-
-template <size_t I, typename... Types>
-_FORCE_INLINE_ const auto &tuple_get(const Tuple<Types...> &p_tuple) {
-	return TupleGet<I, Tuple<Types...>>::tuple_get(p_tuple);
-}
+struct tuple_element<I, ::Tuple<Types...>> {
+	using type = ::TupleElement<I, ::Tuple<Types...>>;
+};
+} //namespace std
+#endif

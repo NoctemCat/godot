@@ -251,10 +251,15 @@ template <size_t... Is>
 struct IndexSequence {};
 
 template <size_t N, size_t... Is>
-struct BuildIndexSequence : BuildIndexSequence<N - 1, N - 1, Is...> {};
+struct BuildIndexSequenceImpl : BuildIndexSequenceImpl<N - 1, N - 1, Is...> {};
 
 template <size_t... Is>
-struct BuildIndexSequence<0, Is...> : IndexSequence<Is...> {};
+struct BuildIndexSequenceImpl<0, Is...> {
+	using type = IndexSequence<Is...>;
+};
+
+template <size_t N>
+using BuildIndexSequence = typename BuildIndexSequenceImpl<N>::type;
 
 // Limit the depth of recursive algorithms when dealing with Array/Dictionary
 #define MAX_RECURSION 100

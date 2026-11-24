@@ -93,11 +93,8 @@ private:
 		private:
 			template <size_t... I>
 			_FORCE_INLINE_ void call_impl(IndexSequence<I...>) {
-				(instance->*method)(std::move(get<I>())...);
+				(instance->*method)(std::move(args).template get<I>()...);
 			}
-
-			template <size_t I>
-			_FORCE_INLINE_ auto &get() { return ::tuple_get<I>(args); }
 		};
 
 		static const uint32_t DEFAULT_COMMAND_MEM_SIZE_KB = 64;
